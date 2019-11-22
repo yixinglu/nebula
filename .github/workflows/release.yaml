@@ -16,12 +16,10 @@ jobs:
           - ubuntu1804
           - centos6
           - centos7
-    container:
-      image: vesoft/nebula-dev:${{ matrix.os }}
     steps:
       - uses: actions/checkout@v1
       - name: Package
-        run: ./package/package.sh
+        run: docker run --rm -v $(pwd):/home/nebula vesoft/nebula-dev:${{ matrix.os }} ./package/package.sh
       - name: Output vars
         id: vars
         env:
@@ -31,14 +29,34 @@ jobs:
           tag=$(echo ${{ github.ref }} | rev | cut -d/ -f1 | rev)
           cd $CPACK_OUTPUT_DIR
           filename=$(find . -type f \( -iname \*.deb -o -iname \*.rpm \) -exec basename {} \;)
+          content_type=$(file -b --mime-type $filename)
           sha256sum $filename > $filename.$SHA_EXT
+          sha_content_type=$(file -b --mime-type $filename.$SHA_EXT)
+          upload_url=$(curl -s --request GET --url "https://api.github.com/repos/${{ github.repository }}/releases/tags/$tag" | grep -oP '(?<="upload_url": ")[^"]*' | cut -d'{' -f1)
           echo "::set-output name=tag::$tag"
-          echo "::set-output name=filepath::$CPACK_OUTPUT_DIR/$filename"
-          echo "::set-output name=shafilepath::$CPACK_OUTPUT_DIR/$filename.$SHA_EXT"
-      - name: Upload release asset
-        run: |
-          ./ci/scripts/upload-github-release-asset.sh github_token=${{ secrets.GITHUB_TOKEN }} repo=${{ github.repository }} tag=${{ steps.vars.outputs.tag }} filepath=${{ steps.vars.outputs.filepath }}
-          ./ci/scripts/upload-github-release-asset.sh github_token=${{ secrets.GITHUB_TOKEN }} repo=${{ github.repository }} tag=${{ steps.vars.outputs.tag }} filepath=${{ steps.vars.outputs.shafilepath }}
+          echo "::set-output name=filename::$filename"
+          echo "::set-output name=content_type::$content_type"
+          echo "::set-output name=sha_filename::$filename.$SHA_EXT"
+          echo "::set-output name=sha_content_type::$sha_content_type"
+          echo "::set-output name=upload_url::$upload_url"
+      - name: Upload Package Release Asset
+        uses: actions/upload-release-asset@v1.0.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.vars.outputs.upload_url }}
+          asset_path: build/cpack_output/${{ steps.vars.outputs.filename }}
+          asset_name: ${{ steps.vars.outputs.filename }}
+          asset_content_type: ${{ steps.vars.outputs.content_type }}
+      - name: Upload Package SHA Release Asset
+        uses: actions/upload-release-asset@v1.0.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.vars.outputs.upload_url }}
+          asset_path: build/cpack_output/${{ steps.vars.outputs.sha_filename }}
+          asset_name: ${{ steps.vars.outputs.sha_filename }}
+          asset_content_type: ${{ steps.vars.outputs.sha_content_type }}
       - name: Upload release artifacts
         uses: actions/upload-artifact@v1
         with:
