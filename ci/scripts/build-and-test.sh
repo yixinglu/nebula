@@ -3,7 +3,7 @@
 # parameters:
 # - build_type
 #
-# example: build.sh build_type=Release
+# example: build-and-test.sh build_type=Release
 
 set -e
 

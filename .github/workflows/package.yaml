@@ -19,7 +19,7 @@ jobs:
       image: vesoft/nebula-dev:${{ matrix.os }}
     steps:
       - uses: actions/checkout@v1
-      - name: package
+      - name: Package
         run: ./package/package.sh
         shell: bash
       - name: Upload nightly artifacts

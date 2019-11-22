@@ -22,11 +22,11 @@ jobs:
       - uses: actions/checkout@v1
         with:
           fetch-depth: 1
-      - name: cache cmake build files
+      - name: Cache cmake build files
         uses: actions/cache@v1
         with:
           path: _build
           key: ${{ matrix.os }}-build-release
-      - name: build and test in docker container
+      - name: Build and test in docker container
         timeout-minutes: 90
         run: docker run --rm -v $(pwd):/home/nebula vesoft/nebula-dev:${{ matrix.os }} ./ci/scripts/build.sh build_type=Release
