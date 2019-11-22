@@ -26,7 +26,7 @@ jobs:
         uses: actions/cache@v1
         with:
           path: _build
-          key: ${{ matrix.tag }}-build-release
+          key: ${{ matrix.os }}-build-release
       - name: build and test in docker container
         timeout-minutes: 90
         run: docker run --rm -v $(pwd):/home/nebula vesoft/nebula-dev:${{ matrix.os }} ./ci/scripts/build.sh build_type=Release
