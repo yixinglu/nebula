@@ -13,8 +13,8 @@
 
 set -e
 
-for op in $@; do
-  eval "$op"
+for param in $@; do
+  eval "$param"
 done
 
 GH_RELEASE="https://api.github.com/repos/$repo/releases/tags/$tag"
