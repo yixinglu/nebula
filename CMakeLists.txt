@@ -47,12 +47,14 @@ option(ENABLE_UBSAN "Whether to turn Undefined Behavior Sanitizer ON or OFF" OFF
 option(ENABLE_FUZZ_TEST "Whether to turn Fuzz Test ON or OFF" OFF)
 option(ENABLE_WERROR "Whether to error on warnings" ON)
 option(ENABLE_TSAN "Whether to turn Thread Sanitizer ON or OFF" OFF)
+option(ENABLE_COVERAGE "Whether to turn code coverage ON or OFF" OFF)
 
 message(STATUS "ENABLE_ASAN: ${ENABLE_ASAN}")
 message(STATUS "ENABLE_TESTING: ${ENABLE_TESTING}")
 message(STATUS "ENABLE_UBSAN: ${ENABLE_UBSAN}")
 message(STATUS "ENABLE_FUZZ_TEST: ${ENABLE_FUZZ_TEST}")
 message(STATUS "ENABLE_TSAN: ${ENABLE_TSAN}")
+message(STATUS "ENABLE_COVERAGE: ${ENABLE_COVERAGE}")
 
 
 if (ENABLE_NATIVE)
@@ -337,6 +339,13 @@ if(ENABLE_FUZZ_TEST)
     endif()
 endif()
 
+# Code Coverage
+set(COV_LIB "")
+if (ENABLE_COVERAGE AND "${CMAKE_CXX_COMPILER_ID}" STREQUAL "Clang" AND ${CMAKE_BUILD_TYPE} STREQUAL "Debug")
+    add_compile_options(--coverage)
+    set(COV_LIB "--coverage")
+endif()
+
 macro(nebula_add_executable)
     cmake_parse_arguments(
         nebula_exec                 # prefix
@@ -509,6 +518,7 @@ macro(nebula_link_libraries target)
         ${GETTIME_LIB}
         ${libatomic_link_flags}
         -pthread
+        ${COV_LIB}
     )
 endmacro(nebula_link_libraries)
 

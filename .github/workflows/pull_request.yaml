@@ -34,7 +34,7 @@ jobs:
           - gcc-9.2
           - clang-9
         exclude:
-          - os: centos7
+          - os: ubuntu1804
             compiler: clang-9
     container:
       image: vesoft/nebula-dev:${{ matrix.os }}
@@ -66,15 +66,18 @@ jobs:
         run: |
           cd build
           cmake \
+            -DCMAKE_BUILD_TYPE=Debug \
             -DCMAKE_CXX_COMPILER=clang++ \
             -DCMAKE_C_COMPILER=clang \
             -DENABLE_ASAN=on \
+            -DENABLE_COVERAGE=on \
             ..
       - name: Make
         if: steps.ignore_docs.outputs.num_source_files != 0
         run: |
           cd build
-          make -j $(nproc)
+          make -j $(($(nproc)-1))
+        shell: bash
       - name: CTest with multiple threads
         if: steps.ignore_docs.outputs.num_source_files != 0
         timeout-minutes: 15
@@ -99,6 +102,16 @@ jobs:
             --timeout 400 \
             --output-on-failure \
             --rerun-failed
+      - name: Generate coverage file
+        if: matrix.compiler == 'clang-9' && steps.ignore_docs.outputs.num_source_files != 0
+        run: |
+          lcov --capture --gcov-tool $PWD/ci/scripts/llvm-gcov.sh --directory build/ --output-file lcov.info
+      - uses: coverallsapp/github-action@master
+        if: matrix.compiler == 'clang-9' && steps.ignore_docs.outputs.num_source_files != 0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          parallel: true
+          path-to-lcov: ./lcov.info
       - name: Cleanup
         if: always()
         run: rm -rf build
