@@ -13,11 +13,13 @@
 namespace nebula {
 namespace graph {
 
+class PlanNode;
+
 /**
  * The StateTransition tells executor which node it would transfer to.
  */
-class PlanNode;
 using StateTransitionTable = std::vector<std::shared_ptr<PlanNode>>;
+
 class StateTransition {
 public:
     enum class State : int8_t {
@@ -50,11 +52,12 @@ private:
     StateTransitionTable                    table_;
 };
 
+class StartNode;
+
 /**
  * PlanNode is an abstraction of nodes in an execution plan which
  * is a kind of directed cyclic graph.
  */
-class StartNode;
 class PlanNode {
 public:
     enum class Kind : uint8_t {
@@ -91,6 +94,10 @@ public:
         stateTrans_ = std::move(stateTrans);
     }
 
+    void setPreTrans(StateTransition&& prevTrans) {
+        prevTrans_ = std::move(prevTrans);
+    }
+
     Kind kind() const {
         return kind_;
     }
@@ -119,6 +126,13 @@ public:
     }
 
     /**
+     * This table is used for finding the previous node(s) to be executed.
+     */
+    StateTransitionTable prevTable() {
+        return prevTrans_.table();
+    }
+
+    /**
      * Append a sub-plan to another one.
      */
     Status append(std::shared_ptr<PlanNode> start);
@@ -132,6 +146,9 @@ protected:
     Kind                        kind_{Kind::kUnknown};
     std::vector<std::string>    outputColNames_;
     StateTransition             stateTrans_;
+
+    // Previous plan nodes which are depended by this one
+    StateTransition prevTrans_;
 };
 
 /**

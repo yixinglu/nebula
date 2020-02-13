@@ -140,25 +140,45 @@ if("${NEBULA_COMMON_REPO_TAG}" STREQUAL "")
     SET(NEBULA_COMMON_REPO_TAG "HEAD")
 endif()
 
-include(ExternalProject)
-ExternalProject_Add(
-    common
-    PREFIX modules
-    SOURCE_DIR modules/common
-    GIT_REPOSITORY ${NEBULA_COMMON_REPO_URL}
-    GIT_SHALLOW true
-    GIT_PROGRESS true
-    GIT_TAG ${NEBULA_COMMON_REPO_TAG}
-    CMAKE_ARGS
-        -DNEBULA_THIRDPARTY_ROOT=${NEBULA_THIRDPARTY_ROOT}
-        -DNEBULA_OTHER_ROOT=${NEBULA_OTHER_ROOT}
-        -DENABLE_JEMALLOC=${ENABLE_JEMALLOC}
-        -DENABLE_NATIVE=${ENABLE_NATIVE}
-        -DENABLE_CCACHE=${ENABLE_CCACHE}
-        -DENABLE_TESTING=false
-    INSTALL_COMMAND ""
-    BUILD_IN_SOURCE true
-)
+# include(FetchContent)
+# FetchContent_Declare(
+#     common
+#     PREFIX modules
+#     SOURCE_DIR modules/common
+#     GIT_REPOSITORY ${NEBULA_COMMON_REPO_URL}
+#     GIT_SHALLOW true
+#     GIT_PROGRESS true
+#     GIT_TAG ${NEBULA_COMMON_REPO_TAG}
+#     CMAKE_ARGS
+#         -DNEBULA_THIRDPARTY_ROOT=${NEBULA_THIRDPARTY_ROOT}
+#         -DNEBULA_OTHER_ROOT=${NEBULA_OTHER_ROOT}
+#         -DENABLE_JEMALLOC=${ENABLE_JEMALLOC}
+#         -DENABLE_NATIVE=${ENABLE_NATIVE}
+#         -DENABLE_CCACHE=${ENABLE_CCACHE}
+#         -DENABLE_TESTING=false
+#     PATCH_COMMAND git apply < ${CMAKE_CURRENT_SOURCE_DIR}/patch/exports.patch
+#     # PATCH_COMMAND echo "patch command: ${CMAKE_CURRENT_SOURCE_DIR}"
+#     INSTALL_COMMAND ""
+#     BUILD_IN_SOURCE false
+# )
+
+# FetchContent_GetProperties(common)
+# if(NOT common_POPULATED)
+#   FetchContent_Populate(common)
+#   message(STATUS "source dir: ${common_SOURCE_DIR}, bin-dir: ${common_BINARY_DIR}")
+#   add_subdirectory(${common_SOURCE_DIR} ${common_BINARY_DIR} EXCLUDE_F)
+#   # include_directories(AFTER ${common_SOURCE_DIR}/src)
+#   # include_directories(AFTER ${common_BINARY_DIR}/src/interface)
+#   # include(${common_BINARY_DIR}/nebula-common-config.cmake)
+# endif()
+
+# ExternalProject_Get_Property(common SOURCE_DIR)
+find_package(nebula-common REQUIRED)
+if(nebula-common_FOUND)
+  message(STATUS "Found nebula-common module, dir: ${nebula-common_DIR}")
+  include_directories(AFTER ${nebula-common_DIR}/../src)
+  include_directories(AFTER ${nebula-common_DIR}/src/interface)
+endif()
 
 # third-party
 if(NOT ${NEBULA_THIRDPARTY_ROOT} STREQUAL "")
@@ -311,21 +331,19 @@ endmacro()
 # including the precompiled header, a.k.a Base.h.gch, and thrift headers.
 macro(nebula_add_library name type)
     add_library(${name} ${type} ${ARGN})
-    if (PCHSupport_FOUND)
-        add_dependencies(
-            ${name}
-            base_obj_gch
-        )
-    endif()
-    add_dependencies(
-        ${name}
-        parser_target
-    )
+    # if (PCHSupport_FOUND)
+    #     add_dependencies(
+    #         ${name}
+    #         base_obj_gch
+    #     )
+    # endif()
+    # add_dependencies(
+    #     ${name}
+    #     parser_target
+    # )
 endmacro()
 
 include_directories(AFTER ${NEBULA_HOME}/src)
-include_directories(AFTER modules/common/src)
-include_directories(AFTER modules/common/src/interface)
 include_directories(AFTER ${CMAKE_CURRENT_BINARY_DIR}/src)
 include_directories(AFTER ${CMAKE_CURRENT_BINARY_DIR}/src/parser)
 

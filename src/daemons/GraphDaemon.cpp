@@ -5,7 +5,7 @@
  */
 
 #include "base/Base.h"
-#include "common/base/SignalHandler.h"
+#include "base/SignalHandler.h"
 #include "network/NetworkUtils.h"
 #include <signal.h>
 #include <errno.h>

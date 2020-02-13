@@ -1,0 +1,18 @@
+diff --git cmake/FindDoubleConversion.cmake cmake/FindDoubleConversion.cmake
+index 3580d88..0fef5d6 100644
+--- cmake/FindDoubleConversion.cmake
++++ cmake/FindDoubleConversion.cmake
+@@ -13,7 +13,7 @@
+ #  DoubleConversion_INCLUDE_DIR      The double-conversion includes directories.
+ #  DoubleConversion_LIBRARY          The double-conversion library.
+ 
+-find_path(DoubleConversion_INCLUDE_DIR NAMES double-conversion.h)
++find_path(DoubleConversion_INCLUDE_DIR NAMES double-conversion/double-conversion.h)
+ find_library(DoubleConversion_LIBRARY NAMES libdouble-conversion.a)
+ 
+ if(DoubleConversion_INCLUDE_DIR AND DoubleConversion_LIBRARY)
+@@ -27,4 +27,3 @@ endif()
+ if(NOT DoubleConversion_FOUND)
+     message(FATAL_ERROR "Double-conversion doesn't exist")
+ endif()
+-

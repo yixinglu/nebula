@@ -5,7 +5,7 @@
  */
 
 #include "base/Base.h"
-#include "graph/GraphService.h"
+#include "service/GraphService.h"
 #include "time/Duration.h"
 #include "graph/RequestContext.h"
 #include "graph/SimpleAuthenticator.h"
@@ -102,4 +102,3 @@ const char* GraphService::getErrorStr(cpp2::ErrorCode result) {
 
 }  // namespace graph
 }  // namespace nebula
-

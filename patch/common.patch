@@ -1,0 +1,1576 @@
+From 7c3847821e41aaa3af7d0d469b29a2fae42263f3 Mon Sep 17 00:00:00 2001
+From: sherman-the-tank <sherman.ye@vesoft.com>
+Date: Tue, 4 Feb 2020 20:50:25 +0800
+Subject: [PATCH] Updated thrift interface
+
+1) Made VertexID a fixed-length binary array
+2) Made property type id compatible with version 1.0
+3) More accessory functions for the class Value
+---
+ src/clients/meta/MetaClient.cpp              |  25 +-
+ src/clients/meta/MetaClient.h                |   8 +-
+ src/clients/storage/GeneralStorageClient.cpp |   8 +-
+ src/clients/storage/GraphStorageClient.cpp   |  27 +-
+ src/clients/storage/StorageClientBase.h      |   8 +-
+ src/clients/storage/StorageClientBase.inl    |  23 +-
+ src/datatypes/Value.cpp                      | 612 ++++++++++++++-----
+ src/datatypes/Value.h                        | 174 ++++--
+ src/interface/common.thrift                  |  22 +-
+ src/interface/meta.thrift                    |   7 +-
+ src/meta/NebulaSchemaProvider.cpp            |   6 +-
+ src/meta/NebulaSchemaProvider.h              |  14 +-
+ src/meta/SchemaProviderIf.h                  |   6 +-
+ src/thrift/ThriftTypes.h                     |   9 +-
+ 14 files changed, 701 insertions(+), 248 deletions(-)
+
+diff --git a/src/clients/meta/MetaClient.cpp b/src/clients/meta/MetaClient.cpp
+index 2b2cdcb..8514525 100644
+--- a/src/clients/meta/MetaClient.cpp
++++ b/src/clients/meta/MetaClient.cpp
+@@ -5,6 +5,7 @@
+  */
+ 
+ #include "base/Base.h"
++#include <folly/hash/Hash.h>
+ #include "clients/meta/MetaClient.h"
+ #include "time/Duration.h"
+ #include "network/NetworkUtils.h"
+@@ -569,6 +570,28 @@ folly::Future<StatusOr<GraphSpaceID>> MetaClient::createSpace(std::string name,
+     return future;
+ }
+ 
++
++StatusOr<PartitionID> MetaClient::partId(GraphSpaceID spaceId, const VertexID id) const {
++    auto status = partsNum(spaceId);
++    if (!status.ok()) {
++        return Status::Error("Space not found, spaceid: %d", spaceId);
++    }
++
++    auto numParts = status.value();
++    // If the length of the id is 8, we will treat it as int64_t to be compatible
++    // with the version 1.0
++    uint64_t vid = 0;
++    if (id.size() == 8) {
++        memcpy(static_cast<void*>(&vid), id.data(), 8);
++    } else {
++        vid = folly::hash::fnv64_buf(id.data(), id.size());
++    }
++    PartitionID pId = vid % numParts + 1;
++    CHECK_GT(pId, 0U);
++    return pId;
++}
++
++
+ folly::Future<StatusOr<std::vector<SpaceIdName>>> MetaClient::listSpaces() {
+     cpp2::ListSpacesReq req;
+     folly::Promise<StatusOr<std::vector<SpaceIdName>>> promise;
+@@ -910,7 +933,7 @@ bool MetaClient::checkSpaceExistInCache(const HostAddr& host,
+     return false;
+ }
+ 
+-StatusOr<int32_t> MetaClient::partsNum(GraphSpaceID spaceId) {
++StatusOr<int32_t> MetaClient::partsNum(GraphSpaceID spaceId) const {
+     folly::RWSpinLock::ReadHolder holder(localCacheLock_);
+     auto it = localCache_.find(spaceId);
+     if (it == localCache_.end()) {
+diff --git a/src/clients/meta/MetaClient.h b/src/clients/meta/MetaClient.h
+index 4ecc110..e271398 100644
+--- a/src/clients/meta/MetaClient.h
++++ b/src/clients/meta/MetaClient.h
+@@ -317,7 +317,9 @@ class MetaClient {
+     bool checkSpaceExistInCache(const HostAddr& host,
+                                 GraphSpaceID spaceId);
+ 
+-    StatusOr<int32_t> partsNum(GraphSpaceID spaceId);
++    StatusOr<int32_t> partsNum(GraphSpaceID spaceId) const;
++
++    StatusOr<PartitionID> partId(GraphSpaceID spaceId, VertexID id) const;
+ 
+     StatusOr<std::shared_ptr<const SchemaProviderIf>>
+     getTagSchemaFromCache(GraphSpaceID spaceId, TagID tagID, SchemaVer ver = -1);
+@@ -440,8 +442,8 @@ class MetaClient {
+     SpaceEdgeTypeNameMap  spaceEdgeIndexByType_;
+     SpaceNewestTagVerMap  spaceNewestTagVerMap_;
+     SpaceNewestEdgeVerMap spaceNewestEdgeVerMap_;
+-    SpaceAllEdgeMap      spaceAllEdgeMap_;
+-    folly::RWSpinLock     localCacheLock_;
++    SpaceAllEdgeMap       spaceAllEdgeMap_;
++    mutable folly::RWSpinLock     localCacheLock_;
+     MetaChangedListener*  listener_{nullptr};
+     folly::RWSpinLock     listenerLock_;
+     std::atomic<ClusterID> clusterId_{0};
+diff --git a/src/clients/storage/GeneralStorageClient.cpp b/src/clients/storage/GeneralStorageClient.cpp
+index 8011b60..d288b35 100644
+--- a/src/clients/storage/GeneralStorageClient.cpp
++++ b/src/clients/storage/GeneralStorageClient.cpp
+@@ -16,8 +16,8 @@ GeneralStorageClient::get(GraphSpaceID space,
+                           folly::EventBase* evb) {
+     auto status = clusterIdsToHosts(space,
+                                     std::move(keys),
+-                                    [] (const std::string& v) {
+-        return std::hash<std::string>{}(v);
++                                    [] (const std::string& v) -> const std::string& {
++        return v;
+     });
+ 
+     if (!status.ok()) {
+@@ -50,8 +50,8 @@ GeneralStorageClient::put(GraphSpaceID space,
+                           folly::EventBase* evb) {
+     auto status = clusterIdsToHosts(space,
+                                     std::move(kvs),
+-                                    [] (const KeyValue& v) {
+-        return std::hash<std::string>{}(v.key);
++                                    [] (const KeyValue& v) -> const std::string& {
++        return v.key;
+     });
+ 
+     if (!status.ok()) {
+diff --git a/src/clients/storage/GraphStorageClient.cpp b/src/clients/storage/GraphStorageClient.cpp
+index b354f7d..eba01f4 100644
+--- a/src/clients/storage/GraphStorageClient.cpp
++++ b/src/clients/storage/GraphStorageClient.cpp
+@@ -21,7 +21,7 @@ GraphStorageClient::getNeighbors(GraphSpaceID space,
+                                  folly::EventBase* evb) {
+     auto status = clusterIdsToHosts(space,
+                                     std::move(vertices),
+-                                    [](const VertexID& v) {
++                                    [](const VertexID& v) -> const VertexID& {
+         return v;
+     });
+ 
+@@ -62,7 +62,7 @@ GraphStorageClient::addVertices(GraphSpaceID space,
+                                 folly::EventBase* evb) {
+     auto status = clusterIdsToHosts(space,
+                                     std::move(vertices),
+-                                    [](const cpp2::NewVertex& v) {
++                                    [](const cpp2::NewVertex& v) -> const VertexID& {
+         return v.get_id();
+     });
+ 
+@@ -99,7 +99,7 @@ GraphStorageClient::addEdges(GraphSpaceID space,
+                              folly::EventBase* evb) {
+     auto status = clusterIdsToHosts(space,
+                                     std::move(edges),
+-                                    [](const cpp2::NewEdge& e) {
++                                    [](const cpp2::NewEdge& e) -> const VertexID& {
+         return e.get_key().get_src();
+     });
+ 
+@@ -136,7 +136,7 @@ GraphStorageClient::getVertexProps(GraphSpaceID space,
+                                    folly::EventBase* evb) {
+     auto status = clusterIdsToHosts(space,
+                                     std::move(vertices),
+-                                    [](const VertexID& v) {
++                                    [](const VertexID& v) -> const VertexID& {
+         return v;
+     });
+ 
+@@ -175,7 +175,7 @@ GraphStorageClient::getEdgeProps(GraphSpaceID space,
+                                  folly::EventBase* evb) {
+     auto status = clusterIdsToHosts(space,
+                                     std::move(edges),
+-                                    [](const cpp2::EdgeKey& v) {
++                                    [](const cpp2::EdgeKey& v) -> const VertexID& {
+         return v.get_src();
+     });
+ 
+@@ -212,7 +212,7 @@ GraphStorageClient::deleteEdges(GraphSpaceID space,
+                                 folly::EventBase* evb) {
+     auto status = clusterIdsToHosts(space,
+                                     std::move(edges),
+-                                    [](const cpp2::EdgeKey& v) {
++                                    [](const cpp2::EdgeKey& v) -> const VertexID& {
+         return v.get_src();
+     });
+ 
+@@ -244,7 +244,9 @@ folly::SemiFuture<StorageRpcResponse<cpp2::ExecResponse>>
+ GraphStorageClient::deleteVertices(GraphSpaceID space,
+                                    std::vector<VertexID> ids,
+                                    folly::EventBase* evb) {
+-    auto status = clusterIdsToHosts(space, std::move(ids), [](const VertexID& v) {
++    auto status = clusterIdsToHosts(space,
++                                    std::move(ids),
++                                    [](const VertexID& v) -> const VertexID& {
+         return v;
+     });
+ 
+@@ -282,7 +284,8 @@ GraphStorageClient::updateVertex(GraphSpaceID space,
+                                  folly::EventBase* evb) {
+     std::pair<HostAddr, cpp2::UpdateVertexRequest> request;
+ 
+-    auto status = partId(space, vertexId);
++    DCHECK(!!metaClient_);
++    auto status = metaClient_->partId(space, vertexId);
+     if (!status.ok()) {
+         return folly::makeFuture<StatusOr<storage::cpp2::UpdateResponse>>(status.status());
+     }
+@@ -328,7 +331,8 @@ GraphStorageClient::updateEdge(GraphSpaceID space,
+                                folly::EventBase* evb) {
+     std::pair<HostAddr, cpp2::UpdateEdgeRequest> request;
+ 
+-    auto status = partId(space, edgeKey.get_src());
++    DCHECK(!!metaClient_);
++    auto status = metaClient_->partId(space, edgeKey.get_src());
+     if (!status.ok()) {
+         return folly::makeFuture<StatusOr<storage::cpp2::UpdateResponse>>(status.status());
+     }
+@@ -369,9 +373,8 @@ GraphStorageClient::getUUID(GraphSpaceID space,
+                             const std::string& name,
+                             folly::EventBase* evb) {
+     std::pair<HostAddr, cpp2::GetUUIDReq> request;
+-    std::hash<std::string> hashFunc;
+-    auto hashValue = hashFunc(name);
+-    auto status = partId(space, hashValue);
++    DCHECK(!!metaClient_);
++    auto status = metaClient_->partId(space, name);
+     if (!status.ok()) {
+         return folly::makeFuture<StatusOr<cpp2::GetUUIDResp>>(status.status());
+     }
+diff --git a/src/clients/storage/StorageClientBase.h b/src/clients/storage/StorageClientBase.h
+index 955aeb7..dedec26 100644
+--- a/src/clients/storage/StorageClientBase.h
++++ b/src/clients/storage/StorageClientBase.h
+@@ -123,21 +123,19 @@ class StorageClientBase {
+     >
+     clusterIdsToHosts(GraphSpaceID spaceId, Container&& ids, GetIdFunc f) const;
+ 
+-    // Calculate the partition id for the given vertex id
+-    StatusOr<PartitionID> partId(GraphSpaceID spaceId, int64_t id) const;
+-
+     virtual StatusOr<meta::PartHosts> getPartHosts(GraphSpaceID spaceId,
+                                                    PartitionID partId) const {
+         CHECK(metaClient_ != nullptr);
+         return metaClient_->getPartHostsFromCache(spaceId, partId);
+     }
+ 
++protected:
++    meta::MetaClient* metaClient_{nullptr};
++
+ private:
+     std::shared_ptr<folly::IOThreadPoolExecutor> ioThreadPool_;
+     std::unique_ptr<thrift::ThriftClientManager<ClientType>> clientsMan_;
+ 
+-    meta::MetaClient* metaClient_{nullptr};
+-
+     mutable folly::RWSpinLock leadersLock_;
+     mutable std::unordered_map<std::pair<GraphSpaceID, PartitionID>, HostAddr> leaders_;
+ };
+diff --git a/src/clients/storage/StorageClientBase.inl b/src/clients/storage/StorageClientBase.inl
+index 2d430d4..f8ac3c7 100644
+--- a/src/clients/storage/StorageClientBase.inl
++++ b/src/clients/storage/StorageClientBase.inl
+@@ -78,8 +78,8 @@ template<typename ClientType>
+ StorageClientBase<ClientType>::StorageClientBase(
+     std::shared_ptr<folly::IOThreadPoolExecutor> threadPool,
+     meta::MetaClient* metaClient)
+-        : ioThreadPool_(threadPool)
+-        , metaClient_(metaClient) {
++        : metaClient_(metaClient)
++        , ioThreadPool_(threadPool) {
+     clientsMan_ = std::make_unique<thrift::ThriftClientManager<ClientType>>();
+ }
+ 
+@@ -307,22 +307,6 @@ folly::Future<StatusOr<Response>> StorageClientBase<ClientType>::getResponse(
+ }
+ 
+ 
+-template<typename ClientType>
+-StatusOr<PartitionID> StorageClientBase<ClientType>::partId(GraphSpaceID spaceId,
+-                                                            int64_t id) const {
+-    CHECK(metaClient_ != nullptr);
+-    auto status = metaClient_->partsNum(spaceId);
+-    if (!status.ok()) {
+-        return Status::Error("Space not found, spaceid: %d", spaceId);
+-    }
+-
+-    auto parts = status.value();
+-    auto s = ((static_cast<uint64_t>(id)) % parts + 1);
+-    CHECK_GT(s, 0U);
+-    return s;
+-}
+-
+-
+ template<typename ClientType>
+ template<class Container, class GetIdFunc>
+ StatusOr<
+@@ -345,7 +329,8 @@ StorageClientBase<ClientType>::clusterIdsToHosts(GraphSpaceID spaceId,
+         >
+     > clusters;
+     for (auto& id : ids) {
+-        auto status = partId(spaceId, f(id));
++        CHECK(!!metaClient_);
++        auto status = metaClient_->partId(spaceId, f(id));
+         if (!status.ok()) {
+             return status;
+         }
+diff --git a/src/datatypes/Value.cpp b/src/datatypes/Value.cpp
+index 1ab9aca..9bdaf95 100644
+--- a/src/datatypes/Value.cpp
++++ b/src/datatypes/Value.cpp
+@@ -12,64 +12,54 @@ Value::Value(Value&& rhs) : type_(Value::Type::__EMPTY__) {
+     if (this == &rhs) { return; }
+     if (rhs.type_ == Type::__EMPTY__) { return; }
+     switch (rhs.type_) {
+-        case Type::nVal:
++        case Type::NULLVALUE:
+         {
+             value_.nVal = std::move(rhs.value_.nVal);
+             break;
+         }
+-        case Type::vVal:
+-        {
+-            value_.vVal = std::move(rhs.value_.vVal);
+-            break;
+-        }
+-        case Type::bVal:
++        case Type::BOOL:
+         {
+             value_.bVal = std::move(rhs.value_.bVal);
+             break;
+         }
+-        case Type::iVal:
++        case Type::INT:
+         {
+             value_.iVal = std::move(rhs.value_.iVal);
+             break;
+         }
+-        case Type::fVal:
++        case Type::FLOAT:
+         {
+             value_.fVal = std::move(rhs.value_.fVal);
+             break;
+         }
+-        case Type::sVal:
++        case Type::STRING:
+         {
+             value_.sVal = std::move(rhs.value_.sVal);
+             break;
+         }
+-        case Type::tVal:
+-        {
+-            value_.tVal = std::move(rhs.value_.tVal);
+-            break;
+-        }
+-        case Type::dVal:
++        case Type::DATE:
+         {
+             value_.dVal = std::move(rhs.value_.dVal);
+             break;
+         }
+-        case Type::dtVal:
++        case Type::DATETIME:
+         {
+-            value_.dtVal = std::move(rhs.value_.dtVal);
++            value_.tVal = std::move(rhs.value_.tVal);
+             break;
+         }
+-        case Type::pVal:
++        case Type::PATH:
+         {
+             value_.pVal = std::move(rhs.value_.pVal);
+             break;
+         }
+-        case Type::listVal:
++        case Type::LIST:
+         {
+-            value_.listVal = std::move(rhs.value_.listVal);
++            value_.lVal = std::move(rhs.value_.lVal);
+             break;
+         }
+-        case Type::mapVal:
++        case Type::MAP:
+         {
+-            value_.mapVal = std::move(rhs.value_.mapVal);
++            value_.mVal = std::move(rhs.value_.mVal);
+             break;
+         }
+         default:
+@@ -87,66 +77,56 @@ Value::Value(const Value& rhs) : type_(Value::Type::__EMPTY__) {
+     if (this == &rhs) { return; }
+     if (rhs.type_ == Type::__EMPTY__) { return; }
+     switch (rhs.type_) {
+-        case Type::nVal:
++        case Type::NULLVALUE:
+         {
+             value_.nVal = rhs.value_.nVal;
+             break;
+         }
+-        case Type::vVal:
+-        {
+-            value_.vVal = rhs.value_.vVal;
+-            break;
+-        }
+-        case Type::bVal:
++        case Type::BOOL:
+         {
+             value_.bVal = rhs.value_.bVal;
+             break;
+         }
+-        case Type::iVal:
++        case Type::INT:
+         {
+             value_.iVal = rhs.value_.iVal;
+             break;
+         }
+-        case Type::fVal:
++        case Type::FLOAT:
+         {
+             value_.fVal = rhs.value_.fVal;
+             break;
+         }
+-        case Type::sVal:
++        case Type::STRING:
+         {
+             value_.sVal = rhs.value_.sVal;
+             break;
+         }
+-        case Type::tVal:
+-        {
+-            value_.tVal = rhs.value_.tVal;
+-            break;
+-        }
+-        case Type::dVal:
++        case Type::DATE:
+         {
+             value_.dVal = rhs.value_.dVal;
+             break;
+         }
+-        case Type::dtVal:
++        case Type::DATETIME:
+         {
+-            value_.dtVal = rhs.value_.dtVal;
++            value_.tVal = rhs.value_.tVal;
+             break;
+         }
+-        case Type::pVal:
++        case Type::PATH:
+         {
+             value_.pVal = rhs.value_.pVal;
+             break;
+         }
+-        case Type::listVal:
++        case Type::LIST:
+         {
+-            value_.listVal = std::make_unique<List>();
+-            *value_.listVal = *rhs.value_.listVal;
++            value_.lVal = std::make_unique<List>();
++            *value_.lVal = *rhs.value_.lVal;
+             break;
+         }
+-        case Type::mapVal:
++        case Type::MAP:
+         {
+-            value_.mapVal = std::make_unique<Map>();
+-            *value_.mapVal = *rhs.value_.mapVal;
++            value_.mVal = std::make_unique<Map>();
++            *value_.mVal = *rhs.value_.mVal;
+             break;
+         }
+         default:
+@@ -158,57 +138,383 @@ Value::Value(const Value& rhs) : type_(Value::Type::__EMPTY__) {
+     type_ = rhs.type_;
+ }
+ 
++Value::Value(NullType v) : type_(Value::Type::NULLVALUE) {
++    value_.nVal = v;
++}
++
++Value::Value(bool v) : type_(Value::Type::BOOL) {
++    value_.bVal = v;
++}
++
++Value::Value(int64_t v) : type_(Value::Type::INT) {
++    value_.iVal = v;
++}
++
++Value::Value(double v) : type_(Value::Type::FLOAT) {
++    value_.fVal = v;
++}
++
++Value::Value(const std::string& v) : type_(Value::Type::STRING) {
++    value_.sVal = v;
++}
++
++Value::Value(std::string&& v) : type_(Value::Type::STRING) {
++    value_.sVal = std::move(v);
++}
++
++Value::Value(const Date& v) : type_(Value::Type::DATE) {
++    value_.dVal = v;
++}
++
++Value::Value(Date&& v) : type_(Value::Type::DATE) {
++    value_.dVal = std::move(v);
++}
++
++Value::Value(const DateTime& v) : type_(Value::Type::DATETIME) {
++    value_.tVal = v;
++}
++
++Value::Value(DateTime&& v) : type_(Value::Type::DATETIME) {
++    value_.tVal = std::move(v);
++}
++
++Value::Value(const Path& v) : type_(Value::Type::PATH) {
++    value_.pVal = v;
++}
++
++Value::Value(Path&& v) : type_(Value::Type::PATH) {
++    value_.pVal = std::move(v);
++}
++
++Value::Value(const List& v) : type_(Value::Type::LIST) {
++    value_.lVal = std::make_unique<List>(v);
++}
++
++Value::Value(List&& v) : type_(Value::Type::LIST) {
++    value_.lVal = std::make_unique<List>(std::move(v));
++}
++
++Value::Value(const Map& v) : type_(Value::Type::MAP) {
++    value_.mVal = std::make_unique<Map>(v);
++}
++
++Value::Value(Map&& v) : type_(Value::Type::MAP) {
++    value_.mVal = std::make_unique<Map>(std::move(v));
++}
++
++
++Value& Value::operator=(NullType v) {
++    set(v);
++    return *this;
++}
++
++Value& Value::operator=(bool v) {
++    set(v);
++    return *this;
++}
++
++Value& Value::operator=(int64_t v) {
++    set(v);
++    return *this;
++}
++
++Value& Value::operator=(double v) {
++    set(v);
++    return *this;
++}
++
++Value& Value::operator=(const std::string& v) {
++    set(v);
++    return *this;
++}
++
++Value& Value::operator=(std::string&& v) {
++    set(std::move(v));
++    return *this;
++}
++
++Value& Value::operator=(const Date& v) {
++    set(v);
++    return *this;
++}
++
++Value& Value::operator=(Date&& v) {
++    set(std::move(v));
++    return *this;
++}
++
++Value& Value::operator=(const DateTime& v) {
++    set(v);
++    return *this;
++}
++
++Value& Value::operator=(DateTime&& v) {
++    set(std::move(v));
++    return *this;
++}
++
++Value& Value::operator=(const Path& v) {
++    set(v);
++    return *this;
++}
++
++Value& Value::operator=(Path&& v) {
++    set(std::move(v));
++    return *this;
++}
++
++Value& Value::operator=(const List& v) {
++    set(v);
++    return *this;
++}
++
++Value& Value::operator=(List&& v) {
++    set(std::move(v));
++    return *this;
++}
++
++Value& Value::operator=(const Map& v) {
++    set(v);
++    return *this;
++}
++
++Value& Value::operator=(Map&& v) {
++    set(std::move(v));
++    return *this;
++}
++
++
++void Value::set(NullType v) {
++    clear();
++    type_ = Type::NULLVALUE;
++    value_.nVal = v;
++}
++
++void Value::set(bool v) {
++    clear();
++    type_ = Type::BOOL;
++    value_.bVal = v;
++}
++
++void Value::set(int64_t v) {
++    clear();
++    type_ = Type::INT;
++    value_.iVal = v;
++}
++
++void Value::set(double v) {
++    clear();
++    type_ = Type::FLOAT;
++    value_.fVal = v;
++}
++
++void Value::set(const std::string& v) {
++    clear();
++    type_ = Type::STRING;
++    value_.sVal = v;
++}
++
++void Value::set(std::string&& v) {
++    clear();
++    type_ = Type::STRING;
++    value_.sVal = std::move(v);
++}
++
++void Value::set(const Date& v) {
++    clear();
++    type_ = Type::DATE;
++    value_.dVal = v;
++}
++
++void Value::set(Date&& v) {
++    clear();
++    type_ = Type::DATE;
++    value_.dVal = std::move(v);
++}
++
++void Value::set(const DateTime& v) {
++    clear();
++    type_ = Type::DATETIME;
++    value_.tVal = v;
++}
++
++void Value::set(DateTime&& v) {
++    clear();
++    type_ = Type::DATETIME;
++    value_.tVal = v;
++}
++
++void Value::set(const Path& v) {
++    clear();
++    type_ = Type::PATH;
++    value_.pVal = v;
++}
++
++void Value::set(Path&& v) {
++    clear();
++    type_ = Type::PATH;
++    value_.pVal = std::move(v);
++}
++
++void Value::set(const List& v) {
++    clear();
++    type_ = Type::LIST;
++    value_.lVal = std::make_unique<List>(v);
++}
++
++void Value::set(List&& v) {
++    clear();
++    type_ = Type::LIST;
++    value_.lVal = std::make_unique<List>(std::move(v));
++}
++
++void Value::set(const Map& v) {
++    clear();
++    type_ = Type::MAP;
++    value_.mVal = std::make_unique<Map>(v);
++}
++
++void Value::set(Map&& v) {
++    clear();
++    type_ = Type::MAP;
++    value_.mVal = std::make_unique<Map>(std::move(v));
++}
++
++
++NullType Value::getNullType() const {
++    CHECK_EQ(type_, Type::NULLVALUE);
++    return value_.nVal;
++}
++
++bool Value::getBool() const {
++    CHECK_EQ(type_, Type::BOOL);
++    return value_.bVal;
++}
++
++int64_t Value::getInt() const {
++    CHECK_EQ(type_, Type::INT);
++    return value_.iVal;
++}
++
++double Value::getDouble() const {
++    CHECK_EQ(type_, Type::FLOAT);
++    return value_.fVal;
++}
++
++const std::string& Value::getString() const {
++    CHECK_EQ(type_, Type::STRING);
++    return value_.sVal;
++}
++
++const Date& Value::getDate() const {
++    CHECK_EQ(type_, Type::DATE);
++    return value_.dVal;
++}
++
++const DateTime& Value::getDateTime() const {
++    CHECK_EQ(type_, Type::DATETIME);
++    return value_.tVal;
++}
++
++const Path& Value::getPath() const {
++    CHECK_EQ(type_, Type::PATH);
++    return value_.pVal;
++}
++
++const List& Value::getList() const {
++    CHECK_EQ(type_, Type::LIST);
++    return *(value_.lVal);
++}
++
++const Map& Value::getMap() const {
++    CHECK_EQ(type_, Type::MAP);
++    return *(value_.mVal);
++}
++
++
++std::string Value::moveString() {
++    CHECK_EQ(type_, Type::STRING);
++    type_ = Type::__EMPTY__;
++    return std::move(value_.sVal);
++}
++
++Date Value::moveDate() {
++    CHECK_EQ(type_, Type::DATE);
++    type_ = Type::__EMPTY__;
++    return std::move(value_.dVal);
++}
++
++DateTime Value::moveDateTime() {
++    CHECK_EQ(type_, Type::DATETIME);
++    type_ = Type::__EMPTY__;
++    return std::move(value_.tVal);
++}
++
++Path Value::movePath() {
++    CHECK_EQ(type_, Type::PATH);
++    type_ = Type::__EMPTY__;
++    return std::move(value_.pVal);
++}
++
++List Value::moveList() {
++    CHECK_EQ(type_, Type::LIST);
++    type_ = Type::__EMPTY__;
++    List list = std::move(*(value_.lVal));
++    destruct(value_.lVal);
++    return list;
++}
++
++Map Value::moveMap() {
++    CHECK_EQ(type_, Type::MAP);
++    type_ = Type::__EMPTY__;
++    Map map = std::move(*(value_.mVal));
++    destruct(value_.mVal);
++    return map;
++}
++
+ 
+ bool Value::operator==(const Value& rhs) const {
+     if (type_ != rhs.type_) { return false; }
+     switch (type_) {
+-        case Type::nVal:
++        case Type::NULLVALUE:
+         {
+           return value_.nVal == rhs.value_.nVal;
+         }
+-        case Type::vVal:
+-        {
+-          return value_.vVal == rhs.value_.vVal;
+-        }
+-        case Type::bVal:
++        case Type::BOOL:
+         {
+           return value_.bVal == rhs.value_.bVal;
+         }
+-        case Type::iVal:
++        case Type::INT:
+         {
+           return value_.iVal == rhs.value_.iVal;
+         }
+-        case Type::fVal:
++        case Type::FLOAT:
+         {
+           return value_.fVal == rhs.value_.fVal;
+         }
+-        case Type::sVal:
++        case Type::STRING:
+         {
+           return value_.sVal == rhs.value_.sVal;
+         }
+-        case Type::tVal:
+-        {
+-          return value_.tVal == rhs.value_.tVal;
+-        }
+-        case Type::dVal:
++        case Type::DATE:
+         {
+           return value_.dVal == rhs.value_.dVal;
+         }
+-        case Type::dtVal:
++        case Type::DATETIME:
+         {
+-          return value_.dtVal == rhs.value_.dtVal;
++          return value_.tVal == rhs.value_.tVal;
+         }
+-        case Type::pVal:
++        case Type::PATH:
+         {
+           return value_.pVal == rhs.value_.pVal;
+         }
+-        case Type::listVal:
++        case Type::LIST:
+         {
+-          return *value_.listVal == *rhs.value_.listVal;
++          return *value_.lVal == *rhs.value_.lVal;
+         }
+-        case Type::mapVal:
++        case Type::MAP:
+         {
+-          return *value_.mapVal == *rhs.value_.mapVal;
++          return *value_.mVal == *rhs.value_.mVal;
+         }
+         default:
+         {
+@@ -220,64 +526,54 @@ bool Value::operator==(const Value& rhs) const {
+ 
+ void Value::clear() {
+     switch (type_) {
+-        case Type::nVal:
++        case Type::NULLVALUE:
+         {
+             destruct(value_.nVal);
+             break;
+         }
+-        case Type::vVal:
+-        {
+-            destruct(value_.vVal);
+-            break;
+-        }
+-        case Type::bVal:
++        case Type::BOOL:
+         {
+             destruct(value_.bVal);
+             break;
+         }
+-        case Type::iVal:
++        case Type::INT:
+         {
+             destruct(value_.iVal);
+             break;
+         }
+-        case Type::fVal:
++        case Type::FLOAT:
+         {
+             destruct(value_.fVal);
+             break;
+         }
+-        case Type::sVal:
++        case Type::STRING:
+         {
+             destruct(value_.sVal);
+             break;
+         }
+-        case Type::tVal:
+-        {
+-            destruct(value_.tVal);
+-            break;
+-        }
+-        case Type::dVal:
++        case Type::DATE:
+         {
+             destruct(value_.dVal);
+             break;
+         }
+-        case Type::dtVal:
++        case Type::DATETIME:
+         {
+-            destruct(value_.dtVal);
++            destruct(value_.tVal);
+             break;
+         }
+-        case Type::pVal:
++        case Type::PATH:
+         {
+             destruct(value_.pVal);
+             break;
+         }
+-        case Type::listVal:
++        case Type::LIST:
+         {
+-            destruct(value_.listVal);
++            destruct(value_.lVal);
+             break;
+         }
+-        case Type::mapVal:
++        case Type::MAP:
+         {
+-            destruct(value_.mapVal);
++            destruct(value_.mVal);
+             break;
+         }
+         default:
+@@ -295,64 +591,54 @@ Value& Value::operator=(Value&& rhs) {
+     clear();
+     if (rhs.type_ == Type::__EMPTY__) { return *this; }
+     switch (rhs.type_) {
+-        case Type::nVal:
++        case Type::NULLVALUE:
+         {
+             value_.nVal = std::move(rhs.value_.nVal);
+             break;
+         }
+-        case Type::vVal:
+-        {
+-            value_.vVal = std::move(rhs.value_.vVal);
+-            break;
+-        }
+-        case Type::bVal:
++        case Type::BOOL:
+         {
+             value_.bVal = std::move(rhs.value_.bVal);
+             break;
+         }
+-        case Type::iVal:
++        case Type::INT:
+         {
+             value_.iVal = std::move(rhs.value_.iVal);
+             break;
+         }
+-        case Type::fVal:
++        case Type::FLOAT:
+         {
+             value_.fVal = std::move(rhs.value_.fVal);
+             break;
+         }
+-        case Type::sVal:
++        case Type::STRING:
+         {
+             value_.sVal = std::move(rhs.value_.sVal);
+             break;
+         }
+-        case Type::tVal:
+-        {
+-            value_.tVal = std::move(rhs.value_.tVal);
+-            break;
+-        }
+-        case Type::dVal:
++        case Type::DATE:
+         {
+             value_.dVal = std::move(rhs.value_.dVal);
+             break;
+         }
+-        case Type::dtVal:
++        case Type::DATETIME:
+         {
+-            value_.dtVal = std::move(rhs.value_.dtVal);
++            value_.tVal = std::move(rhs.value_.tVal);
+             break;
+         }
+-        case Type::pVal:
++        case Type::PATH:
+         {
+             value_.pVal = std::move(rhs.value_.pVal);
+             break;
+         }
+-        case Type::listVal:
++        case Type::LIST:
+         {
+-            value_.listVal = std::move(rhs.value_.listVal);
++            value_.lVal = std::move(rhs.value_.lVal);
+             break;
+         }
+-        case Type::mapVal:
++        case Type::MAP:
+         {
+-            value_.mapVal = std::move(rhs.value_.mapVal);
++            value_.mVal = std::move(rhs.value_.mVal);
+             break;
+         }
+         default:
+@@ -372,66 +658,56 @@ Value& Value::operator=(const Value& rhs) {
+     clear();
+     if (rhs.type_ == Type::__EMPTY__) { return *this; }
+     switch (rhs.type_) {
+-        case Type::nVal:
++        case Type::NULLVALUE:
+         {
+             value_.nVal = rhs.value_.nVal;
+             break;
+         }
+-        case Type::vVal:
+-        {
+-            value_.vVal = rhs.value_.vVal;
+-            break;
+-        }
+-        case Type::bVal:
++        case Type::BOOL:
+         {
+             value_.bVal = rhs.value_.bVal;
+             break;
+         }
+-        case Type::iVal:
++        case Type::INT:
+         {
+             value_.iVal = rhs.value_.iVal;
+             break;
+         }
+-        case Type::fVal:
++        case Type::FLOAT:
+         {
+             value_.fVal = rhs.value_.fVal;
+             break;
+         }
+-        case Type::sVal:
++        case Type::STRING:
+         {
+             value_.sVal = rhs.value_.sVal;
+             break;
+         }
+-        case Type::tVal:
+-        {
+-            value_.tVal = rhs.value_.tVal;
+-            break;
+-        }
+-        case Type::dVal:
++        case Type::DATE:
+         {
+             value_.dVal = rhs.value_.dVal;
+             break;
+         }
+-        case Type::dtVal:
++        case Type::DATETIME:
+         {
+-            value_.dtVal = rhs.value_.dtVal;
++            value_.tVal = rhs.value_.tVal;
+             break;
+         }
+-        case Type::pVal:
++        case Type::PATH:
+         {
+             value_.pVal = rhs.value_.pVal;
+             break;
+         }
+-        case Type::listVal:
++        case Type::LIST:
+         {
+-            value_.listVal = std::make_unique<List>();
+-            *value_.listVal = *rhs.value_.listVal;
++            value_.lVal = std::make_unique<List>();
++            *value_.lVal = *rhs.value_.lVal;
+             break;
+         }
+-        case Type::mapVal:
++        case Type::MAP:
+         {
+-            value_.mapVal = std::make_unique<Map>();
+-            *value_.mapVal = *rhs.value_.mapVal;
++            value_.mVal = std::make_unique<Map>();
++            *value_.mVal = *rhs.value_.mVal;
+             break;
+         }
+         default:
+@@ -451,6 +727,62 @@ void swap(Value& a, Value& b) {
+   b = std::move(temp);
+ }
+ 
++
++std::ostream& operator<<(std::ostream& os, const Value::Type& type) {
++    switch (type) {
++        case Value::Type::__EMPTY__: {
++            os << "__EMPTY__";
++            break;
++        }
++        case Value::Type::NULLVALUE: {
++            os << "NULL";
++            break;
++        }
++        case Value::Type::BOOL: {
++            os << "BOOL";
++            break;
++        }
++        case Value::Type::INT: {
++            os << "INT";
++            break;
++        }
++        case Value::Type::FLOAT: {
++            os << "FLOAT";
++            break;
++        }
++        case Value::Type::STRING: {
++            os << "STRING";
++            break;
++        }
++        case Value::Type::DATE: {
++            os << "DATE";
++            break;
++        }
++        case Value::Type::DATETIME: {
++            os << "DATETIME";
++            break;
++        }
++        case Value::Type::PATH: {
++            os << "PATH";
++            break;
++        }
++        case Value::Type::LIST: {
++            os << "LIST";
++            break;
++        }
++        case Value::Type::MAP: {
++            os << "MAP";
++            break;
++        }
++        default: {
++            os << "__UNKNOWN__";
++            break;
++        }
++    }
++
++    return os;
++}
++
+ }  // namespace nebula
+ 
+ 
+diff --git a/src/datatypes/Value.h b/src/datatypes/Value.h
+index 27be95a..c3ed41d 100644
+--- a/src/datatypes/Value.h
++++ b/src/datatypes/Value.h
+@@ -25,65 +25,156 @@ enum class NullType {
+ 
+ 
+ struct Value {
+-    enum Type {
++    enum class Type {
+         __EMPTY__ = 0,
+-        nVal = 1,
+-        vVal = 2,
+-        bVal = 3,
+-        iVal = 4,
+-        fVal = 5,
+-        sVal = 6,
+-        tVal = 7,
+-        dVal = 8,
+-        dtVal = 9,
+-        pathVal = 10,
+-        listVal = 11,
+-        mapVal = 12,
+-    } type_;
++        NULLVALUE = 1,
++        BOOL = 2,
++        INT = 3,
++        FLOAT = 4,
++        STRING = 5,
++        DATE = 6,
++        DATETIME = 7,
++        PATH = 8,
++        LIST = 9,
++        MAP = 10,
++    };
++
++    // Constructors
++    Value() : type_(Type::__EMPTY__) {}
++    Value(Value&& rhs);
++    Value(const Value& rhs);
++
++    Value(NullType v);              // NOLINT
++    Value(bool v);                  // NOLINT
++    Value(int64_t v);               // NOLINT
++    Value(double v);                // NOLINT
++    Value(const std::string& v);    // NOLINT
++    Value(std::string&& v);         // NOLINT
++    Value(const Date& v);           // NOLINT
++    Value(Date&& v);                // NOLINT
++    Value(const DateTime& v);       // NOLINT
++    Value(DateTime&& v);            // NOLINT
++    Value(const Path& v);           // NOLINT
++    Value(Path&& v);                // NOLINT
++    Value(const List& v);           // NOLINT
++    Value(List&& v);                // NOLINT
++    Value(const Map& v);            // NOLINT
++    Value(Map&& v);                 // NOLINT
++
++    Value& operator=(Value&& rhs);
++    Value& operator=(const Value& rhs);
++
++    Value& operator=(NullType v);
++    Value& operator=(bool v);
++    Value& operator=(int64_t v);
++    Value& operator=(double v);
++    Value& operator=(const std::string& v);
++    Value& operator=(std::string&& v);
++    Value& operator=(const Date& v);
++    Value& operator=(Date&& v);
++    Value& operator=(const DateTime& v);
++    Value& operator=(DateTime&& v);
++    Value& operator=(const Path& v);
++    Value& operator=(Path&& v);
++    Value& operator=(const List& v);
++    Value& operator=(List&& v);
++    Value& operator=(const Map& v);
++    Value& operator=(Map&& v);
++
++    void set(NullType v);
++    void set(bool v);
++    void set(int64_t v);
++    void set(double v);
++    void set(const std::string& v);
++    void set(std::string&& v);
++    void set(const Date& v);
++    void set(Date&& v);
++    void set(const DateTime& v);
++    void set(DateTime&& v);
++    void set(const Path& v);
++    void set(Path&& v);
++    void set(const List& v);
++    void set(List&& v);
++    void set(const Map& v);
++    void set(Map&& v);
++
++    NullType getNullType() const;
++    bool getBool() const;
++    int64_t getInt() const;
++    double getDouble() const;
++    const std::string& getString() const;
++    const Date& getDate() const;
++    const DateTime& getDateTime() const;
++    const Path& getPath() const;
++    const List& getList() const;
++    const Map& getMap() const;
++
++    std::string moveString();
++    Date moveDate();
++    DateTime moveDateTime();
++    Path movePath();
++    List moveList();
++    Map moveMap();
++
++    Type type() const noexcept {
++        return type_;
++    }
++
++    bool operator==(const Value& rhs) const;
++
++    static const Value& null() noexcept {
++        static const Value kNullValue(NullType::NT_Null);
++        return kNullValue;
++    }
++
++private:
++    Type type_;
+ 
+     union Storage {
+         NullType                nVal;
+-        VertexID                vVal;
+         bool                    bVal;
+         int64_t                 iVal;
+         double                  fVal;
+         std::string             sVal;
+-        Timestamp               tVal;
+         Date                    dVal;
+-        DateTime                dtVal;
++        DateTime                tVal;
+         Path                    pVal;
+-        std::unique_ptr<List>   listVal;
+-        std::unique_ptr<Map>    mapVal;
++        std::unique_ptr<List>   lVal;
++        std::unique_ptr<Map>    mVal;
+ 
+         Storage() {}
+         ~Storage() {}
+     } value_;
+ 
+-    // Constructors
+-    Value() : type_(Type::__EMPTY__) {}
+-    Value(Value&& rhs);
+-    Value(const Value& rhs);
+-
+-    bool operator==(const Value& rhs) const;
+-
+-    Value& operator=(Value&& rhs);
+-    Value& operator=(const Value& rhs);
+-
+-private:
+-  template <class T>
+-  void destruct(T& val) {
+-    (&val)->~T();
+-  }
++    template <class T>
++    void destruct(T& val) {
++        (&val)->~T();
++    }
+ 
+-  void clear();
++    void clear();
+ };
+ 
+ void swap(Value& a, Value& b);
+ 
++std::ostream& operator<<(std::ostream& os, const Value::Type& type);
++
+ 
+ struct Map {
+     std::unordered_map<std::string, Value> kvs;
+ 
++    Map() = default;
++    Map(const Map&) = default;
++    Map(Map&&) = default;
++
++    Map& operator=(const Map& rhs) {
++        kvs = rhs.kvs;
++        return *this;
++    }
++    Map& operator=(Map&& rhs) {
++        kvs = std::move(rhs.kvs);
++        return *this;
++    }
++
+     bool operator==(const Map& rhs) const {
+         return kvs == rhs.kvs;
+     }
+@@ -93,6 +184,19 @@ struct Map {
+ struct List {
+     std::vector<Value> values;
+ 
++    List() = default;
++    List(const List&) = default;
++    List(List&&) = default;
++
++    List& operator=(const List& rhs) {
++        values = rhs.values;
++        return *this;
++    }
++    List& operator=(List&& rhs) {
++        values = std::move(rhs.values);
++        return *this;
++    }
++
+     bool operator==(const List& rhs) const {
+         return values == rhs.values;
+     }
+diff --git a/src/interface/common.thrift b/src/interface/common.thrift
+index 59c7246..077a2c7 100644
+--- a/src/interface/common.thrift
++++ b/src/interface/common.thrift
+@@ -28,7 +28,7 @@ typedef i32 (cpp.type = "nebula::PartitionID") PartitionID
+ typedef i32 (cpp.type = "nebula::TagID") TagID
+ typedef i32 (cpp.type = "nebula::EdgeType") EdgeType
+ typedef i64 (cpp.type = "nebula::EdgeRanking") EdgeRanking
+-typedef i64 (cpp.type = "nebula::VertexID") VertexID
++typedef binary (cpp.type = "nebula::VertexID") VertexID
+ 
+ typedef i64 (cpp.type = "nebula::Timestamp") Timestamp
+ 
+@@ -82,17 +82,15 @@ enum NullType {
+ // The type to hold any supported values during the query
+ union Value {
+     1: NullType                             nVal;
+-    2: VertexID                             vVal;
+-    3: bool                                 bVal;
+-    4: i64                                  iVal;
+-    5: double                               fVal;
+-    6: binary                               sVal;
+-    7: Timestamp                            tVal;
+-    8: Date                                 dVal;
+-    9: DateTime                             dtVal;
+-    10: Path                                pVal;
+-    11: List (cpp.type = "nebula::List")    listVal (cpp.ref_type = "unique");
+-    12: Map (cpp.type = "nebula::Map")      mapVal (cpp.ref_type = "unique");
++    2: bool                                 bVal;
++    3: i64                                  iVal;
++    4: double                               fVal;
++    5: binary                               sVal;
++    6: Date                                 dVal;
++    7: DateTime                             dtVal;
++    8: Path                                 pVal;
++    9: List (cpp.type = "nebula::List")     listVal (cpp.ref_type = "unique");
++    10: Map (cpp.type = "nebula::Map")      mapVal (cpp.ref_type = "unique");
+ } (cpp.type = "nebula::Value")
+ 
+ 
+diff --git a/src/interface/meta.thrift b/src/interface/meta.thrift
+index 4ebb955..f58502d 100644
+--- a/src/interface/meta.thrift
++++ b/src/interface/meta.thrift
+@@ -130,10 +130,10 @@ enum PropertyType {
+ struct ColumnDef {
+     1: required binary          name,
+     2: required PropertyType    type,
++    3: optional common.Value    default_value,
+     // type_length is valid for fixed_string type
+-    3: required i16             type_length = 0,
+-    4: required bool            nullable = false,
+-    5: optional common.Value    default_value,
++    4: optional i16             type_length = 0,
++    5: optional bool            nullable = false,
+ }
+ 
+ struct SchemaProp {
+@@ -155,6 +155,7 @@ struct SpaceProperties {
+     1: binary   space_name,
+     2: i32      partition_num,
+     3: i32      replica_factor,
++    4: i32      vid_size = 8,
+ }
+ 
+ struct SpaceItem {
+diff --git a/src/meta/NebulaSchemaProvider.cpp b/src/meta/NebulaSchemaProvider.cpp
+index 2440a69..b7a550b 100644
+--- a/src/meta/NebulaSchemaProvider.cpp
++++ b/src/meta/NebulaSchemaProvider.cpp
+@@ -37,7 +37,7 @@ const char* NebulaSchemaProvider::getFieldName(int64_t index) const {
+         return nullptr;
+     }
+ 
+-    return fields_[index]->getName();
++    return fields_[index]->name();
+ }
+ 
+ 
+@@ -47,7 +47,7 @@ const cpp2::PropertyType NebulaSchemaProvider::getFieldType(int64_t index) const
+         return cpp2::PropertyType::UNKNOWN;
+     }
+ 
+-    return fields_[index]->getType();
++    return fields_[index]->type();
+ }
+ 
+ 
+@@ -59,7 +59,7 @@ const cpp2::PropertyType NebulaSchemaProvider::getFieldType(const folly::StringP
+         return cpp2::PropertyType::UNKNOWN;
+     }
+ 
+-    return fields_[it->second]->getType();
++    return fields_[it->second]->type();
+ }
+ 
+ 
+diff --git a/src/meta/NebulaSchemaProvider.h b/src/meta/NebulaSchemaProvider.h
+index 17cc01a..ab478fa 100644
+--- a/src/meta/NebulaSchemaProvider.h
++++ b/src/meta/NebulaSchemaProvider.h
+@@ -23,11 +23,11 @@ class NebulaSchemaProvider : public SchemaProviderIf {
+             : name_(std::move(name))
+             , type_(std::move(type)) {}
+ 
+-        const char* getName() const override {
++        const char* name() const override {
+             return name_.c_str();
+         }
+ 
+-        const cpp2::PropertyType getType() const override {
++        const cpp2::PropertyType type() const override {
+             return type_;
+         }
+ 
+@@ -39,7 +39,7 @@ class NebulaSchemaProvider : public SchemaProviderIf {
+             return hasDefault_;
+         }
+ 
+-        std::string getDefaultValue() const override {
++        const Value& defaultValue() const override {
+             return defaultValue_;
+         }
+ 
+@@ -47,7 +47,7 @@ class NebulaSchemaProvider : public SchemaProviderIf {
+         std::string name_;
+         cpp2::PropertyType type_;
+         bool hasDefault_;
+-        std::string defaultValue_;
++        Value defaultValue_;
+     };
+ 
+ public:
+@@ -79,9 +79,9 @@ class NebulaSchemaProvider : public SchemaProviderIf {
+     SchemaVer ver_{-1};
+ 
+     // fieldname -> index
+-    std::unordered_map<std::string, int64_t>   fieldNameIndex_;
+-    std::vector<std::shared_ptr<SchemaField>>  fields_;
+-    cpp2::SchemaProp                   schemaProp_;
++    std::unordered_map<std::string, int64_t>    fieldNameIndex_;
++    std::vector<std::shared_ptr<SchemaField>>   fields_;
++    cpp2::SchemaProp                            schemaProp_;
+ };
+ 
+ }  // namespace meta
+diff --git a/src/meta/SchemaProviderIf.h b/src/meta/SchemaProviderIf.h
+index 2d0a9ce..667dbc1 100644
+--- a/src/meta/SchemaProviderIf.h
++++ b/src/meta/SchemaProviderIf.h
+@@ -21,11 +21,11 @@ class SchemaProviderIf {
+     public:
+         virtual ~Field() = default;
+ 
+-        virtual const char* getName() const = 0;
+-        virtual const cpp2::PropertyType getType() const = 0;
++        virtual const char* name() const = 0;
++        virtual const cpp2::PropertyType type() const = 0;
+         virtual bool isValid() const = 0;
+         virtual bool hasDefault() const = 0;
+-        virtual std::string getDefaultValue() const = 0;
++        virtual const Value& defaultValue() const = 0;
+     };
+ 
+     // Inherited classes do not need to implement the Iterator
+diff --git a/src/thrift/ThriftTypes.h b/src/thrift/ThriftTypes.h
+index 1803ce1..2cf8079 100644
+--- a/src/thrift/ThriftTypes.h
++++ b/src/thrift/ThriftTypes.h
+@@ -22,7 +22,14 @@ using Port = int32_t;
+ 
+ using TagIndexID = int32_t;
+ using EdgeIndexID = int32_t;
+-using VertexID = int64_t;
++// Starting from 2.0, both string and int64 vertex ids will be supported.
++//
++// The string id must be fixed-length (the length of the id will be specified
++// as a Graph Space property). So the int64 id will be treated as 8-byte string
++//
++// If the length of a given id is shorter than the specified length, '\0' will
++// be appended to the end
++using VertexID = std::string;
+ using TagID = int32_t;
+ using TagVersion = int64_t;
+ using EdgeType = int32_t;

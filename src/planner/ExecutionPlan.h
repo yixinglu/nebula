@@ -4,8 +4,8 @@
  * attached with Common Clause Condition 1.0, found in the LICENSES directory.
  */
 
-#ifndef GRAPH_EXECUTIONPLAN_H_
-#define GRAPH_EXECUTIONPLAN_H_
+#ifndef PLANNER_EXECUTIONPLAN_H_
+#define PLANNER_EXECUTIONPLAN_H_
 
 #include "base/Base.h"
 #include "base/Status.h"
@@ -50,13 +50,21 @@ public:
         return ectx_.get();
     }
 
+    // Add depended execution plan
+    void addDependedPlan(ExecutionPlan* dep) {
+        deps_.push_back(dep);
+    }
+
 private:
     std::unique_ptr<SequentialSentences>        sentences_;
     std::unique_ptr<ExecutionContext>           ectx_;
     std::unique_ptr<SequentialExecutor>         executor_;
+
+    // Dependencies of this plan
+    std::vector<ExecutionPlan*> deps_;
 };
 
 }   // namespace graph
 }   // namespace nebula
 
-#endif  // GRAPH_EXECUTIONPLAN_H_
+#endif  // PLANNER_EXECUTIONPLAN_H_

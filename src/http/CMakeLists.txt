@@ -5,10 +5,8 @@
 #
 
 nebula_add_library(
-    planner_obj OBJECT
-    PlanNode.cpp
-    Plan.cpp
-    LogicalPlan.cpp
-    ExecutionPlan.cpp
-    Query.cpp
-)
+  graph_http_handler OBJECT
+  GraphHttpHandler.cpp
+  )
+
+nebula_add_subdirectory(test)

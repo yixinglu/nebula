@@ -9,8 +9,12 @@ _build.log
 _install
 install_manifest.txt
 
+!build/modules/common/
+!_build/modules/common/
+
 # ccls
 .ccls
+.ccls-cache
 compile_commands.json
 
 gen-*

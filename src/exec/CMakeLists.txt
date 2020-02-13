@@ -5,10 +5,7 @@
 #
 
 nebula_add_library(
-    planner_obj OBJECT
-    PlanNode.cpp
-    Plan.cpp
-    LogicalPlan.cpp
-    ExecutionPlan.cpp
-    Query.cpp
-)
+  exec_obj OBJECT
+  Executor.cpp
+  ExecutionContext.cpp
+  )
